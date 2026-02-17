@@ -6,34 +6,82 @@ const responses = [];
 const botRepeatButtonIDToIndexMap = {};
 const userRepeatButtonIDToRecordingMap = {};
 const baseUrl = window.location.origin;
+let recognition = null;
+
+// Initialize speech recognition
+function initializeSpeechRecognition() {
+  if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+    recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = 'en-US';
+    recognition.maxAlternatives = 1;
+    return true;
+  }
+  return false;
+}
 
 async function showBotLoadingAnimation() {
   await sleep(500);
-  $(".loading-animation")[1].style.display = "inline-block";
+  $(".loading-animation").eq(0).addClass("show").css("display", "flex");
 }
 
 function hideBotLoadingAnimation() {
-  $(".loading-animation")[1].style.display = "none";
+  $(".loading-animation").eq(0).removeClass("show").css("display", "none");
 }
 
 async function showUserLoadingAnimation() {
   await sleep(100);
-  $(".loading-animation")[0].style.display = "flex";
+  $(".loading-animation").eq(1).addClass("show").css("display", "flex");
 }
 
 function hideUserLoadingAnimation() {
-  $(".loading-animation")[0].style.display = "none";
+  $(".loading-animation").eq(1).removeClass("show").css("display", "none");
 }
 
-const getSpeechToText = async (userRecording) => {
-  let response = await fetch(baseUrl + "/speech-to-text", {
-    method: "POST",
-    body: userRecording.audioBlob,
+const getSpeechToText = () => {
+  return new Promise((resolve, reject) => {
+    if (!initializeSpeechRecognition()) {
+      reject("Speech recognition not supported in this browser. Please use Chrome, Edge, or Safari.");
+      return;
+    }
+
+    let hasResult = false;
+
+    recognition.onresult = (event) => {
+      hasResult = true;
+      const transcript = event.results[0][0].transcript;
+      console.log('Recognized text:', transcript);
+      resolve(transcript);
+    };
+
+    recognition.onerror = (event) => {
+      console.error('Speech recognition error:', event.error);
+      if (event.error === 'no-speech') {
+        reject('No speech detected. Please try again.');
+      } else if (event.error === 'audio-capture') {
+        reject('Microphone not found or not accessible.');
+      } else if (event.error === 'not-allowed') {
+        reject('Microphone permission denied. Please allow microphone access.');
+      } else {
+        reject('Could not recognize speech: ' + event.error);
+      }
+    };
+
+    recognition.onend = () => {
+      if (!hasResult) {
+        reject('Speech recognition ended without result.');
+      }
+    };
+
+    try {
+      recognition.start();
+      console.log('Speech recognition started');
+    } catch (error) {
+      console.error('Error starting recognition:', error);
+      reject('Could not start speech recognition: ' + error.message);
+    }
   });
-  console.log(response);
-  response = await response.json();
-  console.log(response);
-  return response.text;
 };
 
 const processUserMessage = async (userMessage) => {
@@ -44,7 +92,12 @@ const processUserMessage = async (userMessage) => {
   });
   response = await response.json();
   console.log(response);
-  return response;
+  
+  // Adapt the response to match what the rest of the code expects
+  return {
+    openaiResponseText: response.response,
+    openaiResponseSpeech: null // We'll add TTS later
+  };
 };
 
 const cleanTextInput = (value) => {
@@ -101,6 +154,10 @@ const toggleRecording = async () => {
 const playResponseAudio = (function () {
   const df = document.createDocumentFragment();
   return function Sound(src) {
+    // If src is null, use browser's speech synthesis
+    if (!src || src === "data:audio/wav;base64,null") {
+      return null;
+    }
     const snd = new Audio(src);
     df.appendChild(snd); // keep in fragment until finished playing
     snd.addEventListener("ended", function () {
@@ -110,6 +167,24 @@ const playResponseAudio = (function () {
     return snd;
   };
 })();
+
+// Text-to-Speech using browser's Speech Synthesis API
+const speakText = (text) => {
+  if ('speechSynthesis' in window) {
+    // Stop any ongoing speech
+    window.speechSynthesis.cancel();
+    
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'en-US';
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+    
+    window.speechSynthesis.speak(utterance);
+  } else {
+    console.log('Text-to-speech not supported');
+  }
+};
 
 const getRandomID = () => {
   return Date.now().toString(36) + Math.random().toString(36).substr(2);
@@ -121,6 +196,7 @@ const scrollToBottom = () => {
     scrollTop: $("#chat-window")[0].scrollHeight,
   });
 };
+
 const populateUserMessage = (userMessage, userRecording) => {
   // Clear the input field
   $("#message-input").val("");
@@ -157,21 +233,28 @@ const populateBotResponse = async (userMessage) => {
   const repeatButtonID = getRandomID();
   botRepeatButtonIDToIndexMap[repeatButtonID] = responses.length - 1;
   hideBotLoadingAnimation();
-  // Append the random message to the message list
+  
+  // Append the response to the message list
   $("#message-list").append(
     `<div class='message-line'><div class='message-box${
       !lightMode ? " dark" : ""
     }'>${
       response.openaiResponseText
-    }</div><button id='${repeatButtonID}' class='btn volume repeat-button' onclick='playResponseAudio("data:audio/wav;base64," + responses[botRepeatButtonIDToIndexMap[this.id]].openaiResponseSpeech);console.log(this.id)'><i class='fa fa-volume-up'></i></button></div>`
+    }</div><button id='${repeatButtonID}' class='btn volume repeat-button' onclick='speakText(responses[botRepeatButtonIDToIndexMap[this.id]].openaiResponseText)'><i class='fa fa-volume-up'></i></button></div>`
   );
 
-  playResponseAudio("data:audio/wav;base64," + response.openaiResponseSpeech);
+  // Speak the response using browser TTS
+  speakText(response.openaiResponseText);
 
   scrollToBottom();
 };
 
 $(document).ready(function () {
+  // Check if speech recognition is supported
+  if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+    console.warn('Speech recognition not supported in this browser');
+  }
+
   // Listen for the "Enter" key being pressed in the input field
   $("#message-input").keyup(function (event) {
     let inputVal = cleanTextInput($("#message-input").val());
@@ -201,26 +284,43 @@ $(document).ready(function () {
   // When the user clicks the "Send" button
   $("#send-button").click(async function () {
     if ($("#send-button").hasClass("microphone") && !recording) {
-      toggleRecording();
-      $(".fa-microphone").css("color", "#f44336");
-      console.log("start recording");
+      // Start voice recording
       recording = true;
-    } else if (recording) {
-      toggleRecording().then(async (userRecording) => {
-        console.log("stop recording");
-        await showUserLoadingAnimation();
-        const userMessage = await getSpeechToText(userRecording);
-        populateUserMessage(userMessage, userRecording);
-        populateBotResponse(userMessage);
-      });
+      $(".fa-microphone").css("color", "#f44336");
+      console.log("Start listening...");
+      
+      showUserLoadingAnimation();
+      
+      try {
+        const userMessage = await getSpeechToText();
+        hideUserLoadingAnimation();
+        
+        if (userMessage && userMessage.trim() !== "") {
+          populateUserMessage(userMessage, null);
+          await populateBotResponse(userMessage);
+        }
+      } catch (error) {
+        console.error("Speech recognition error:", error);
+        hideUserLoadingAnimation();
+        alert(error);
+      }
+      
       $(".fa-microphone").css("color", "#125ee5");
       recording = false;
+      
+    } else if (recording) {
+      // This shouldn't happen with the new implementation, but keeping for safety
+      recording = false;
+      $(".fa-microphone").css("color", "#125ee5");
+      hideUserLoadingAnimation();
     } else {
       // Get the message the user typed in
       const message = cleanTextInput($("#message-input").val());
 
-      populateUserMessage(message, null);
-      populateBotResponse(message);
+      if (message && message.trim() !== "") {
+        populateUserMessage(message, null);
+        populateBotResponse(message);
+      }
 
       $("#send-button")
         .removeClass("send")
